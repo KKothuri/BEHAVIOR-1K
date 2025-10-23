@@ -7,6 +7,7 @@ import numpy as np
 import omnigibson as og
 import omnigibson.utils.transform_utils as T
 import os
+import time
 import sys
 import torch as th
 import traceback
@@ -44,6 +45,9 @@ from pathlib import Path
 from signal import signal, SIGINT
 from typing import Any, Tuple, List
 
+from il_lib.utils.checkpoint_utils import load_policy_wrapper
+from il_lib.utils.config_utils import register_eval
+
 m = create_module_macros(module_path=__file__)
 m.NUM_EVAL_EPISODES = 1
 m.NUM_TRAIN_INSTANCES = 200
@@ -59,7 +63,6 @@ gm.ENABLE_TRANSITION_RULES = True
 logger = logging.getLogger("evaluator")
 logger.setLevel(20)  # info
 
-
 class Evaluator:
     """
     Evaluator class for running and evaluating policies for behavior task.
@@ -71,12 +74,15 @@ class Evaluator:
 
     def __init__(self, cfg: DictConfig) -> None:
         self.cfg = cfg
+        logger.info("Evaluator configuration:\n%s", OmegaConf.to_yaml(cfg))
 
         # record total number and success number of trials and trial time
         self.n_trials = 0
         self.n_success_trials = 0
         self.total_time = 0
         self.robot_action = dict()
+        self.policy_time = 0
+        self.env_step_time = 0
 
         self.env = self.load_env(env_wrapper=self.cfg.env_wrapper)
         self.policy = self.load_policy()
@@ -135,7 +141,7 @@ class Evaluator:
             )
         ]
         # Update observation modalities
-        cfg["robots"][0]["obs_modalities"] = ["proprio", "rgb"]
+        cfg["robots"][0]["obs_modalities"] = ["proprio", "rgb", "depth_linear"]
         cfg["robots"][0]["proprio_obs"] = list(PROPRIOCEPTION_INDICES["R1Pro"].keys())
         if self.cfg.robot.controllers is not None:
             cfg["robots"][0]["controller_config"].update(self.cfg.robot.controllers)
@@ -167,6 +173,12 @@ class Evaluator:
         Loads and returns the policy instance.
         """
         policy = instantiate(self.cfg.model)
+        if self.cfg.policy_name == "local":
+            register_eval()
+            with hydra.initialize_config_dir(f"/nethome/skothuri7/flash/repos/BEHAVIOR-1K/OmniGibson/il_lib/il_lib/configs", version_base="1.1"):
+                config = hydra.compose("base_config.yaml")
+            OmegaConf.resolve(config)
+            policy.policy = load_policy_wrapper(config)
         logger.info("")
         logger.info("=" * 50)
         logger.info(f"Loaded policy: {self.cfg.policy_name}")
@@ -200,9 +212,13 @@ class Evaluator:
             5. Invokes step callbacks for all registered metrics to update their state.
             6. Returns the termination and truncation status.
         """
+        policy_start_time = time.time()
         self.robot_action = self.policy.forward(obs=self.obs)
+        self.policy_time = time.time() - policy_start_time
 
+        env_step_start_time = time.time()
         obs, _, terminated, truncated, info = self.env.step(self.robot_action, n_render_iterations=1)
+        self.env_step_time = time.time() - env_step_start_time
         # process obs
         self.obs = self._preprocess_obs(obs)
 
@@ -391,12 +407,12 @@ if __name__ == "__main__":
         instances_to_run = []
         for episode in episodes:
             if episode["episode_index"] // 1e4 == task_idx:
-                instances_to_run.append(str(int((episode["episode_index"] // 10) % 1e3)))
-                if config.eval_instance_ids:
-                    assert set(config.eval_instance_ids).issubset(
-                        set(range(m.NUM_TRAIN_INSTANCES))
-                    ), f"eval instance ids must be in range({m.NUM_TRAIN_INSTANCES})"
-                    instances_to_run = [instances_to_run[i] for i in config.eval_instance_ids]
+                instances_to_run.append(str(int((episode["episode_index"] // 10) % 1000)))
+        if config.eval_instance_ids:
+            assert set(config.eval_instance_ids).issubset(
+                set(range(len(instances_to_run)))
+            ), f"eval instance ids must be in range({len(instances_to_run)})"
+            instances_to_run = [instances_to_run[i] for i in config.eval_instance_ids]
     else:
         instances_to_run = (
             config.eval_instance_ids if config.eval_instance_ids is not None else set(range(m.NUM_EVAL_INSTANCES))
@@ -439,14 +455,25 @@ if __name__ == "__main__":
                 # run metric start callbacks
                 for metric in evaluator.metrics:
                     metric.start_callback(evaluator.env)
+                
+                step_times = []
                 while not done:
+                    start_time = time.time()
                     terminated, truncated = evaluator.step()
+                    total_step_time = time.time() - start_time
+                    step_times.append(total_step_time)
+
                     if terminated or truncated:
                         done = True
                     if config.write_video:
                         evaluator._write_video()
-                    if evaluator.env._current_step % 1000 == 0:
-                        logger.info(f"Current step: {evaluator.env._current_step}")
+
+                    logger.info(
+                        f"Step {evaluator.env._current_step}: "
+                        f"Policy Time: {evaluator.policy_time:.4f}s, "
+                        f"Env Step Time: {evaluator.env_step_time:.4f}s, "
+                        f"Total Step Time: {total_step_time:.4f}s"
+                    )
                 # run metric end callbacks
                 for metric in evaluator.metrics:
                     metric.end_callback(evaluator.env)
@@ -454,6 +481,12 @@ if __name__ == "__main__":
                 logger.info(f"Evaluation exit state: {terminated}, {truncated}")
                 logger.info(f"Total trials: {evaluator.n_trials}")
                 logger.info(f"Total success trials: {evaluator.n_success_trials}")
+
+                if step_times:
+                    avg_step_time = sum(step_times) / len(step_times)
+                    fps = 1.0 / avg_step_time
+                    logger.info(f"Average step time: {avg_step_time:.4f}s ({fps:.2f} FPS)")
+
                 # gather metric results and write to file
                 for metric in evaluator.metrics:
                     metrics.update(metric.gather_results())

@@ -73,7 +73,7 @@ setup(
         ],
         "primitives": [
             "ninja~=1.13.0",
-            "nvidia-curobo @ git+https://github.com/StanfordVL/curobo@cbaf7d32436160956dad190a9465360fad6aba73",
+            # "nvidia-curobo @ git+https://github.com/StanfordVL/curobo@cbaf7d32436160956dad190a9465360fad6aba73",
             "ompl @ https://storage.googleapis.com/gibson_scenes/ompl-1.6.0-cp310-cp310-manylinux_2_28_x86_64.whl",
         ],
         "eval": [
@@ -81,7 +81,7 @@ setup(
             "hydra-core>=1.3.2",
             "websockets>=15.0.1",
             "msgpack>=1.1.0",
-            "lerobot @ git+https://github.com/huggingface/lerobot@577cd10974b84bea1f06b6472eb9e5e74e07f77a",
+            # "lerobot @ git+https://github.com/huggingface/lerobot@577cd10974b84bea1f06b6472eb9e5e74e07f77a",
             "gspread>=6.2.1",
             "open3d>=0.19.0",
         ]
